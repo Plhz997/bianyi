@@ -4,7 +4,7 @@ CPPFLAGS ?= -Iinclude
 LDFLAGS ?= -lm
 
 TARGET := compiler
-SRCS := $(wildcard src/*.cpp) $(wildcard src/frontend/*.cpp)
+SRCS := $(wildcard src/*.cpp) $(wildcard src/frontend/*.cpp) $(wildcard src/ir/*.cpp)
 OBJS := $(SRCS:.cpp=.o)
 
 .PHONY: all clean test
@@ -19,8 +19,8 @@ $(TARGET): $(OBJS)
 
 test: $(TARGET)
 	./$(TARGET) tests/basic.sy --dump-ast >/tmp/bianyi_ast.txt
+	./$(TARGET) tests/basic.sy --dump-ir >/tmp/bianyi_ir.txt
 	./$(TARGET) tests/basic.sy -S -o /tmp/bianyi_basic.s
 
 clean:
 	rm -f $(TARGET) $(OBJS)
-
