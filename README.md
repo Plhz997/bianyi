@@ -25,6 +25,7 @@ Frontend debugging:
 
 ```bash
 ./compiler tests/basic.sy --dump-ast
+./compiler tests/basic.sy --dump-ir
 ```
 
 Competition-style command:
@@ -34,6 +35,6 @@ Competition-style command:
 ./compiler testcase.sysy -S -o testcase.s -O1
 ```
 
-The backend is intentionally minimal in this frontend milestone: it emits a
-small placeholder assembly file after parsing and semantic checks succeed.
-Middle-end IR and RISC-V code generation will be added in later milestones.
+The backend is intentionally minimal for now: it emits a small placeholder
+assembly file after parsing, semantic checks, and IR generation succeed.
+Full RISC-V code generation will be added in a later milestone.
