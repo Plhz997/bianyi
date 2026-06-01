@@ -1,0 +1,23 @@
+const int N = 4;
+int a[4] = {1, 2, 3, 4};
+
+int sum(int n, int arr[]) {
+  int i = 0;
+  int ans = 0;
+  while (i < n) {
+    ans = ans + arr[i];
+    i = i + 1;
+  }
+  return ans;
+}
+
+int main() {
+  int v = sum(N, a);
+  if (v > 0 && v != 9) {
+    putint(v);
+  } else {
+    putint(0);
+  }
+  return 0;
+}
+
