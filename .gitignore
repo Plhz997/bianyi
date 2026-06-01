@@ -1,0 +1,7 @@
+build/
+compiler
+*.o
+*.s
+*.log
+.DS_Store
+
