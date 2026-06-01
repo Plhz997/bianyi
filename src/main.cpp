@@ -1,6 +1,7 @@
 #include "frontend/Lexer.h"
 #include "frontend/Parser.h"
 #include "frontend/Sema.h"
+#include "ir/IRGen.h"
 
 #include <fstream>
 #include <iostream>
@@ -16,12 +17,14 @@ struct Options {
   std::string output;
   bool emitAssembly = false;
   bool dumpAst = false;
+  bool dumpIr = false;
   bool optimize = false;
 };
 
 void printUsage(const char *argv0) {
   std::cerr << "usage: " << argv0
-            << " testcase.sysy [-S -o testcase.s] [-O1] [--dump-ast]\n";
+            << " testcase.sysy [-S -o testcase.s] [-O1] [--dump-ast]"
+               " [--dump-ir]\n";
 }
 
 bool parseArgs(int argc, char **argv, Options &opts) {
@@ -39,6 +42,8 @@ bool parseArgs(int argc, char **argv, Options &opts) {
       opts.optimize = true;
     } else if (arg == "--dump-ast") {
       opts.dumpAst = true;
+    } else if (arg == "--dump-ir") {
+      opts.dumpIr = true;
     } else if (!arg.empty() && arg[0] == '-') {
       std::cerr << "unknown option: " << arg << '\n';
       return false;
@@ -129,6 +134,13 @@ int main(int argc, char **argv) {
     unit->dump(std::cout, 0);
   }
 
+  ir::IRGenerator irgen;
+  auto module = irgen.generate(*unit);
+
+  if (opts.dumpIr) {
+    module.dump(std::cout);
+  }
+
   if (opts.emitAssembly) {
     if (!writeFrontendPlaceholderAssembly(opts.output, opts.optimize)) {
       return 1;
@@ -137,4 +149,3 @@ int main(int argc, char **argv) {
 
   return 0;
 }
-
