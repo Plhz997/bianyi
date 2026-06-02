@@ -4,7 +4,8 @@ CPPFLAGS ?= -Iinclude
 LDFLAGS ?= -lm
 
 TARGET := compiler
-SRCS := $(wildcard src/*.cpp) $(wildcard src/frontend/*.cpp) $(wildcard src/ir/*.cpp)
+SRCS := $(wildcard src/*.cpp) $(wildcard src/frontend/*.cpp) \
+	$(wildcard src/ir/*.cpp) $(wildcard src/backend/*.cpp)
 OBJS := $(SRCS:.cpp=.o)
 
 .PHONY: all clean test

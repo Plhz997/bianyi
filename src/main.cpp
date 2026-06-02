@@ -1,3 +1,4 @@
+#include "backend/RiscVCodeGen.h"
 #include "frontend/Lexer.h"
 #include "frontend/Parser.h"
 #include "frontend/Sema.h"
@@ -78,26 +79,16 @@ bool readFile(const std::string &path, std::string &content) {
   return true;
 }
 
-bool writeFrontendPlaceholderAssembly(const std::string &path,
-                                      bool optimizeEnabled) {
+bool writeAssembly(const CompUnit &unit, const std::string &path,
+                   bool optimizeEnabled) {
   std::ofstream output(path);
   if (!output) {
     std::cerr << "cannot open output file: " << path << '\n';
     return false;
   }
 
-  output << "\t.text\n";
-  output << "\t.globl main\n";
-  output << "\t.type main, @function\n";
-  output << "main:\n";
-  output << "\t# frontend milestone placeholder";
-  if (optimizeEnabled) {
-    output << " (-O1 accepted)";
-  }
-  output << "\n";
-  output << "\tli a0, 0\n";
-  output << "\tret\n";
-  output << "\t.size main, .-main\n";
+  backend::RiscVCodeGenerator codegen({optimizeEnabled});
+  codegen.generate(unit, output);
   return true;
 }
 
@@ -142,7 +133,12 @@ int main(int argc, char **argv) {
   }
 
   if (opts.emitAssembly) {
-    if (!writeFrontendPlaceholderAssembly(opts.output, opts.optimize)) {
+    try {
+      if (!writeAssembly(*unit, opts.output, opts.optimize)) {
+        return 1;
+      }
+    } catch (const std::exception &ex) {
+      std::cerr << "code generation failed: " << ex.what() << '\n';
       return 1;
     }
   }
