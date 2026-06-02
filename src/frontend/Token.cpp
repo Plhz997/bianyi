@@ -1,4 +1,4 @@
-#include "frontend/Token.h"
+#include "Token.h"
 
 namespace by {
 

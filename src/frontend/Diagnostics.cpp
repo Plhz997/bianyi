@@ -1,4 +1,4 @@
-#include "frontend/Diagnostics.h"
+#include "Diagnostics.h"
 
 #include <sstream>
 

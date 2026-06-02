@@ -1,4 +1,4 @@
-#include "ir/IRGen.h"
+#include "IRGen.h"
 
 #include <iomanip>
 #include <sstream>

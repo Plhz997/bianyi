@@ -1,8 +1,8 @@
 #pragma once
 
-#include "frontend/AST.h"
-#include "frontend/Diagnostics.h"
-#include "frontend/Token.h"
+#include "AST.h"
+#include "Diagnostics.h"
+#include "Token.h"
 
 #include <memory>
 #include <vector>

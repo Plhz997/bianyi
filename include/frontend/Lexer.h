@@ -1,7 +1,7 @@
 #pragma once
 
-#include "frontend/Diagnostics.h"
-#include "frontend/Token.h"
+#include "Diagnostics.h"
+#include "Token.h"
 
 #include <string>
 #include <vector>

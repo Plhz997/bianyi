@@ -1,6 +1,6 @@
 CXX ?= clang++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -pedantic
-CPPFLAGS ?= -Iinclude
+CPPFLAGS ?= -Iinclude -Iinclude/frontend -Iinclude/ir -Iinclude/backend
 LDFLAGS ?= -lm
 
 TARGET := compiler

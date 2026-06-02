@@ -1,8 +1,8 @@
-#include "backend/RiscVCodeGen.h"
-#include "frontend/Lexer.h"
-#include "frontend/Parser.h"
-#include "frontend/Sema.h"
-#include "ir/IRGen.h"
+#include "RiscVCodeGen.h"
+#include "Lexer.h"
+#include "Parser.h"
+#include "Sema.h"
+#include "IRGen.h"
 
 #include <fstream>
 #include <iostream>

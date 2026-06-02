@@ -1,4 +1,4 @@
-#include "frontend/AST.h"
+#include "AST.h"
 
 #include <iostream>
 #include <utility>

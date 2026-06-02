@@ -1,4 +1,4 @@
-#include "ir/IR.h"
+#include "IR.h"
 
 #include <ostream>
 

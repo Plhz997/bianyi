@@ -1,4 +1,4 @@
-#include "frontend/Sema.h"
+#include "Sema.h"
 
 #include <utility>
 

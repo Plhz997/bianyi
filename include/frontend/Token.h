@@ -1,6 +1,6 @@
 #pragma once
 
-#include "frontend/Diagnostics.h"
+#include "Diagnostics.h"
 
 #include <cstdint>
 #include <string>

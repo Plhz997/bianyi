@@ -1,7 +1,7 @@
 #pragma once
 
-#include "frontend/AST.h"
-#include "frontend/Diagnostics.h"
+#include "AST.h"
+#include "Diagnostics.h"
 
 #include <optional>
 #include <string>
