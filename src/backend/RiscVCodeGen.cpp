@@ -139,6 +139,23 @@ void flattenInit(const InitVal *init,
   }
 }
 
+void emitWordRun(std::ostream &os, long long value, long long count) {
+  if (count <= 0) {
+    return;
+  }
+  if (value == 0) {
+    os << "\t.zero " << count * kWordSize << "\n";
+    return;
+  }
+  if (count == 1) {
+    os << "\t.word " << value << "\n";
+    return;
+  }
+  os << "\t.rept " << count << "\n";
+  os << "\t.word " << value << "\n";
+  os << "\t.endr\n";
+}
+
 class Generator {
 public:
   Generator(const CompUnit &unit, std::ostream &os, RiscVCodeGenOptions options)
@@ -241,16 +258,34 @@ private:
       }
       for (const auto &def : varDecl->defs) {
         const Symbol &sym = globals_.at(def->name);
+        long long slots = sym.isArray ? elementCount(sym.dims) : 1;
         std::vector<long long> values;
         flattenInit(def->init.get(), values, constScopes_);
-        long long slots = sym.isArray ? elementCount(sym.dims) : 1;
-        values.resize(static_cast<std::size_t>(slots), 0);
+        if (static_cast<long long>(values.size()) > slots) {
+          values.resize(static_cast<std::size_t>(slots));
+        }
 
         os_ << "\t.globl " << sym.label << "\n";
         os_ << "\t.align 2\n";
         os_ << sym.label << ":\n";
-        for (long long value : values) {
-          os_ << "\t.word " << value << "\n";
+        if (values.empty()) {
+          emitWordRun(os_, 0, slots);
+          continue;
+        }
+
+        long long emitted = 0;
+        for (std::size_t i = 0; i < values.size();) {
+          long long value = values[i];
+          std::size_t j = i + 1;
+          while (j < values.size() && values[j] == value) {
+            ++j;
+          }
+          emitWordRun(os_, value, static_cast<long long>(j - i));
+          emitted += static_cast<long long>(j - i);
+          i = j;
+        }
+        if (emitted < slots) {
+          emitWordRun(os_, 0, slots - emitted);
         }
       }
     }
@@ -491,8 +526,13 @@ private:
           std::vector<long long> values;
           flattenInit(def->init.get(), values, constScopes_);
           long long slots = elementCount(sym.dims);
-          values.resize(static_cast<std::size_t>(slots), 0);
+          if (static_cast<long long>(values.size()) > slots) {
+            values.resize(static_cast<std::size_t>(slots));
+          }
           for (std::size_t i = 0; i < values.size(); ++i) {
+            if (values[i] == 0) {
+              continue;
+            }
             os_ << "\tli t0, " << values[i] << "\n";
             emitSw("t0", sym.offset + static_cast<long long>(i) * kWordSize, "s0");
           }
@@ -509,10 +549,28 @@ private:
 
   void zeroArray(const Symbol &sym) {
     long long slots = elementCount(sym.dims);
-    os_ << "\tli t0, 0\n";
-    for (long long i = 0; i < slots; ++i) {
-      emitSw("t0", sym.offset + i * kWordSize, "s0");
+    if (slots <= 0) {
+      return;
     }
+    if (slots <= 8) {
+      os_ << "\tli t0, 0\n";
+      for (long long i = 0; i < slots; ++i) {
+        emitSw("t0", sym.offset + i * kWordSize, "s0");
+      }
+      return;
+    }
+    std::string loopLabel = freshLabel("zero_loop");
+    std::string endLabel = freshLabel("zero_end");
+    emitAddi("t1", "s0", sym.offset);
+    os_ << "\tli t2, " << slots << "\n";
+    os_ << "\tli t0, 0\n";
+    os_ << loopLabel << ":\n";
+    os_ << "\tbeqz t2, " << endLabel << "\n";
+    emitSw("t0", 0, "t1");
+    os_ << "\taddi t1, t1, 4\n";
+    os_ << "\taddi t2, t2, -1\n";
+    os_ << "\tj " << loopLabel << "\n";
+    os_ << endLabel << ":\n";
   }
 
   void genStmt(const Stmt &stmt) {
