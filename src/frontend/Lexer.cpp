@@ -1,4 +1,4 @@
-#include "Lexer.h"
+#include "../../include/frontend/Lexer.h"
 
 #include <cerrno>
 #include <cctype>
@@ -299,4 +299,3 @@ Token Lexer::lexOperatorOrPunct() {
 }
 
 } // namespace by
-

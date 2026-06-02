@@ -1,4 +1,4 @@
-#include "AST.h"
+#include "../../include/frontend/AST.h"
 
 #include <iostream>
 #include <utility>
@@ -262,4 +262,3 @@ void CompUnit::dump(std::ostream &os, int indent) const {
 }
 
 } // namespace by
-

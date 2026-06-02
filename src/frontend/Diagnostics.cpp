@@ -1,4 +1,4 @@
-#include "Diagnostics.h"
+#include "../../include/frontend/Diagnostics.h"
 
 #include <sstream>
 
@@ -33,4 +33,3 @@ void DiagnosticEngine::printAll(std::ostream &os) const {
 }
 
 } // namespace by
-

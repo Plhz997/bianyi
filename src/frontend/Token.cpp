@@ -1,4 +1,4 @@
-#include "Token.h"
+#include "../../include/frontend/Token.h"
 
 namespace by {
 
@@ -90,4 +90,3 @@ bool isTypeKeyword(TokenKind kind) {
 }
 
 } // namespace by
-
