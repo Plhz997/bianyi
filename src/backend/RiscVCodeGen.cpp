@@ -156,6 +156,11 @@ void emitWordRun(std::ostream &os, long long value, long long count) {
   os << "\t.endr\n";
 }
 
+bool hasNonZeroValue(const std::vector<long long> &values) {
+  return std::any_of(values.begin(), values.end(),
+                     [](long long value) { return value != 0; });
+}
+
 class Generator {
 public:
   Generator(const CompUnit &unit, std::ostream &os, RiscVCodeGenOptions options)
@@ -250,7 +255,6 @@ private:
   }
 
   void emitData() {
-    os_ << "\t.data\n";
     for (const auto &decl : unit_.decls) {
       const auto *varDecl = dynamic_cast<const VarDecl *>(decl.get());
       if (!varDecl) {
@@ -265,10 +269,12 @@ private:
           values.resize(static_cast<std::size_t>(slots));
         }
 
+        bool needsData = hasNonZeroValue(values);
+        os_ << (needsData ? "\t.data\n" : "\t.bss\n");
         os_ << "\t.globl " << sym.label << "\n";
         os_ << "\t.align 2\n";
         os_ << sym.label << ":\n";
-        if (values.empty()) {
+        if (!needsData) {
           emitWordRun(os_, 0, slots);
           continue;
         }
