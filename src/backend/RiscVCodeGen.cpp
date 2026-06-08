@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cstdint>
+#include <cstring>
 #include <iostream>
+#include <cmath>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -17,6 +20,13 @@ namespace {
 
 constexpr int kWordSize = 4;
 constexpr int kPtrSize = 8;
+
+uint32_t floatBits(double value) {
+  float narrowed = static_cast<float>(value);
+  uint32_t bits = 0;
+  std::memcpy(&bits, &narrowed, sizeof(bits));
+  return bits;
+}
 
 struct Symbol {
   enum class Storage {
@@ -36,6 +46,7 @@ struct Symbol {
 
 struct FunctionInfo {
   BuiltinType returnType = BuiltinType::Int;
+  std::vector<BuiltinType> paramTypes;
   std::vector<bool> paramIsArray;
 };
 
@@ -65,10 +76,23 @@ std::string sanitizeLabel(const std::string &name) {
   return result;
 }
 
-long long evalConstInt(const Expr &expr,
-                       const std::vector<std::unordered_map<std::string, long long>> &constScopes) {
+long long evalConstInt(
+    const Expr &expr,
+    const std::vector<std::unordered_map<std::string, long long>> &constScopes);
+
+double evalConstFloat(
+    const Expr &expr,
+    const std::vector<std::unordered_map<std::string, long long>> &intScopes,
+    const std::vector<std::unordered_map<std::string, double>> &floatScopes);
+
+long long evalConstInt(
+    const Expr &expr,
+    const std::vector<std::unordered_map<std::string, long long>> &constScopes) {
   if (const auto *integer = dynamic_cast<const IntExpr *>(&expr)) {
     return integer->value;
+  }
+  if (const auto *floating = dynamic_cast<const FloatExpr *>(&expr)) {
+    return static_cast<long long>(floating->value);
   }
   if (const auto *var = dynamic_cast<const VarExpr *>(&expr)) {
     if (!var->indices.empty()) {
@@ -114,6 +138,68 @@ long long evalConstInt(const Expr &expr,
   throw std::runtime_error("expression is not a compile-time integer");
 }
 
+double evalConstFloat(
+    const Expr &expr,
+    const std::vector<std::unordered_map<std::string, long long>> &intScopes,
+    const std::vector<std::unordered_map<std::string, double>> &floatScopes) {
+  if (const auto *floating = dynamic_cast<const FloatExpr *>(&expr)) {
+    return floating->value;
+  }
+  if (const auto *integer = dynamic_cast<const IntExpr *>(&expr)) {
+    return static_cast<double>(integer->value);
+  }
+  if (const auto *var = dynamic_cast<const VarExpr *>(&expr)) {
+    if (!var->indices.empty()) {
+      throw std::runtime_error("array element is not a compile-time constant");
+    }
+    for (auto it = floatScopes.rbegin(); it != floatScopes.rend(); ++it) {
+      auto found = it->find(var->name);
+      if (found != it->end()) {
+        return found->second;
+      }
+    }
+    for (auto it = intScopes.rbegin(); it != intScopes.rend(); ++it) {
+      auto found = it->find(var->name);
+      if (found != it->end()) {
+        return static_cast<double>(found->second);
+      }
+    }
+    throw std::runtime_error("unknown compile-time constant: " + var->name);
+  }
+  if (const auto *unary = dynamic_cast<const UnaryExpr *>(&expr)) {
+    double value = evalConstFloat(*unary->operand, intScopes, floatScopes);
+    if (unary->op == "+") return value;
+    if (unary->op == "-") return -value;
+    if (unary->op == "!") return value == 0.0 ? 1.0 : 0.0;
+  }
+  if (const auto *binary = dynamic_cast<const BinaryExpr *>(&expr)) {
+    double lhs = evalConstFloat(*binary->lhs, intScopes, floatScopes);
+    double rhs = evalConstFloat(*binary->rhs, intScopes, floatScopes);
+    if (binary->op == "+") return lhs + rhs;
+    if (binary->op == "-") return lhs - rhs;
+    if (binary->op == "*") return lhs * rhs;
+    if (binary->op == "/") return rhs == 0.0 ? 0.0 : lhs / rhs;
+    if (binary->op == "==") return lhs == rhs;
+    if (binary->op == "!=") return lhs != rhs;
+    if (binary->op == "<") return lhs < rhs;
+    if (binary->op == "<=") return lhs <= rhs;
+    if (binary->op == ">") return lhs > rhs;
+    if (binary->op == ">=") return lhs >= rhs;
+    if (binary->op == "&&") return (lhs != 0.0) && (rhs != 0.0);
+    if (binary->op == "||") return (lhs != 0.0) || (rhs != 0.0);
+  }
+  throw std::runtime_error("expression is not a compile-time float");
+}
+
+long long evalConstBits(const Expr &expr, BuiltinType type,
+                        const std::vector<std::unordered_map<std::string, long long>> &constScopes,
+                        const std::vector<std::unordered_map<std::string, double>> &floatScopes) {
+  if (type == BuiltinType::Float) {
+    return static_cast<long long>(floatBits(evalConstFloat(expr, constScopes, floatScopes)));
+  }
+  return evalConstInt(expr, constScopes);
+}
+
 long long elementCount(const std::vector<long long> &dims) {
   long long count = 1;
   for (long long dim : dims) {
@@ -122,20 +208,36 @@ long long elementCount(const std::vector<long long> &dims) {
   return count;
 }
 
-void flattenInit(const InitVal *init,
-                 std::vector<long long> &values,
-                 const std::vector<std::unordered_map<std::string, long long>> &constScopes) {
+void flattenConstInit(const InitVal *init, BuiltinType type,
+                      std::vector<long long> &values,
+                      const std::vector<std::unordered_map<std::string, long long>> &constScopes,
+                      const std::vector<std::unordered_map<std::string, double>> &floatScopes) {
   if (!init) {
     return;
   }
   if (init->isList) {
     for (const auto &child : init->values) {
-      flattenInit(child.get(), values, constScopes);
+      flattenConstInit(child.get(), type, values, constScopes, floatScopes);
     }
     return;
   }
   if (init->expr) {
-    values.push_back(evalConstInt(*init->expr, constScopes));
+    values.push_back(evalConstBits(*init->expr, type, constScopes, floatScopes));
+  }
+}
+
+void collectInitExprs(const InitVal *init, std::vector<const Expr *> &values) {
+  if (!init) {
+    return;
+  }
+  if (init->isList) {
+    for (const auto &child : init->values) {
+      collectInitExprs(child.get(), values);
+    }
+    return;
+  }
+  if (init->expr) {
+    values.push_back(init->expr.get());
   }
 }
 
@@ -187,14 +289,21 @@ private:
   std::unordered_map<std::string, FunctionInfo> functions_;
   std::vector<std::unordered_map<std::string, Symbol>> scopes_;
   std::vector<std::unordered_map<std::string, long long>> constScopes_;
+  std::vector<std::unordered_map<std::string, double>> floatConstScopes_;
   std::vector<LoopLabels> loops_;
   std::unordered_map<const FuncParam *, Symbol> plannedParams_;
   std::unordered_map<const VarDef *, Symbol> plannedVars_;
   std::string currentFunction_;
   std::string currentReturnLabel_;
+  BuiltinType currentReturnType_ = BuiltinType::Void;
   long long frameSize_ = 0;
   long long localAreaSize_ = 0;
   int labelId_ = 0;
+
+  int valueSize(BuiltinType type) const {
+    (void)type;
+    return kWordSize;
+  }
 
   void collectFunctions() {
     installBuiltin("getint", BuiltinType::Int, {});
@@ -209,12 +318,16 @@ private:
     installBuiltin("putfarray", BuiltinType::Void, {false, true});
     installBuiltin("starttime", BuiltinType::Void, {});
     installBuiltin("stoptime", BuiltinType::Void, {});
+    functions_["putfloat"].paramTypes = {BuiltinType::Float};
+    functions_["putfarray"].paramTypes = {BuiltinType::Int, BuiltinType::Float};
+    functions_["getfarray"].paramTypes = {BuiltinType::Float};
 
     for (const auto &decl : unit_.decls) {
       if (const auto *func = dynamic_cast<const FuncDef *>(decl.get())) {
         FunctionInfo info;
         info.returnType = func->returnType.base;
         for (const auto &param : func->params) {
+          info.paramTypes.push_back(param->type.base);
           info.paramIsArray.push_back(param->isArray);
         }
         functions_[func->name] = std::move(info);
@@ -225,12 +338,16 @@ private:
   void installBuiltin(const std::string &name, BuiltinType ret, std::vector<bool> params) {
     FunctionInfo info;
     info.returnType = ret;
+    for (bool isArray : params) {
+      info.paramTypes.push_back(isArray ? BuiltinType::Int : BuiltinType::Int);
+    }
     info.paramIsArray = std::move(params);
     functions_[name] = std::move(info);
   }
 
   void collectGlobals() {
     constScopes_.push_back({});
+    floatConstScopes_.push_back({});
     for (const auto &decl : unit_.decls) {
       const auto *varDecl = dynamic_cast<const VarDecl *>(decl.get());
       if (!varDecl) {
@@ -248,7 +365,12 @@ private:
         }
         globals_[def->name] = sym;
         if (sym.isConst && !sym.isArray && def->init && def->init->expr) {
-          constScopes_.back()[def->name] = evalConstInt(*def->init->expr, constScopes_);
+          if (sym.type == BuiltinType::Float) {
+            floatConstScopes_.back()[def->name] =
+                evalConstFloat(*def->init->expr, constScopes_, floatConstScopes_);
+          } else {
+            constScopes_.back()[def->name] = evalConstInt(*def->init->expr, constScopes_);
+          }
         }
       }
     }
@@ -264,7 +386,8 @@ private:
         const Symbol &sym = globals_.at(def->name);
         long long slots = sym.isArray ? elementCount(sym.dims) : 1;
         std::vector<long long> values;
-        flattenInit(def->init.get(), values, constScopes_);
+        flattenConstInit(def->init.get(), sym.type, values, constScopes_,
+                         floatConstScopes_);
         if (static_cast<long long>(values.size()) > slots) {
           values.resize(static_cast<std::size_t>(slots));
         }
@@ -308,9 +431,11 @@ private:
 
   void emitFunction(const FuncDef &func) {
     currentFunction_ = sanitizeLabel(func.name);
+    currentReturnType_ = func.returnType.base;
     currentReturnLabel_ = freshLabel(currentFunction_ + ".return");
     scopes_.clear();
     constScopes_.resize(1);
+    floatConstScopes_.resize(1);
     loops_.clear();
     plannedParams_.clear();
     plannedVars_.clear();
@@ -329,6 +454,7 @@ private:
 
     scopes_.clear();
     constScopes_.resize(1);
+    floatConstScopes_.resize(1);
     pushScope();
 
     os_ << "\t.globl " << currentFunction_ << "\n";
@@ -359,6 +485,7 @@ private:
 
     popScope();
     currentFunction_.clear();
+    currentReturnType_ = BuiltinType::Void;
   }
 
   void collectFrameForParams(const FuncDef &func, FramePlan &plan) {
@@ -370,8 +497,8 @@ private:
       for (const auto &dim : param->dimensions) {
         sym.dims.push_back(evalConstInt(*dim, constScopes_));
       }
-      sym.offset = allocateSlot(plan, param->isArray ? kPtrSize : kWordSize,
-                                param->isArray ? kPtrSize : kWordSize);
+      int size = param->isArray ? kPtrSize : valueSize(param->type.base);
+      sym.offset = allocateSlot(plan, size, size);
       scopes_.back()[param->name] = sym;
       plannedParams_[param.get()] = sym;
     }
@@ -404,12 +531,18 @@ private:
       for (const auto &dim : def->dimensions) {
         sym.dims.push_back(evalConstInt(*dim, constScopes_));
       }
-      long long bytes = sym.isArray ? elementCount(sym.dims) * kWordSize : kWordSize;
-      sym.offset = allocateSlot(plan, bytes, kWordSize);
+      long long bytes = sym.isArray ? elementCount(sym.dims) * valueSize(sym.type)
+                                    : valueSize(sym.type);
+      sym.offset = allocateSlot(plan, bytes, valueSize(sym.type));
       scopes_.back()[def->name] = sym;
       plannedVars_[def.get()] = sym;
       if (sym.isConst && !sym.isArray && def->init && def->init->expr) {
-        constScopes_.back()[def->name] = evalConstInt(*def->init->expr, constScopes_);
+        if (sym.type == BuiltinType::Float) {
+          floatConstScopes_.back()[def->name] =
+              evalConstFloat(*def->init->expr, constScopes_, floatConstScopes_);
+        } else {
+          constScopes_.back()[def->name] = evalConstInt(*def->init->expr, constScopes_);
+        }
       }
     }
   }
@@ -474,6 +607,9 @@ private:
   }
 
   void bindParams(const FuncDef &func) {
+    int intReg = 0;
+    int floatReg = 0;
+    long long stackArgOffset = 0;
     for (std::size_t i = 0; i < func.params.size(); ++i) {
       const auto &param = func.params[i];
       auto planned = plannedParams_.find(param.get());
@@ -481,20 +617,31 @@ private:
       Symbol sym = planned->second;
       bind(param->name, sym);
 
-      if (i < 8) {
+      if (!param->isArray && param->type.base == BuiltinType::Float && floatReg < 8) {
+        emitFsw("fa" + std::to_string(floatReg++), sym.offset, "s0");
+        continue;
+      }
+
+      if ((param->isArray || param->type.base != BuiltinType::Float) && intReg < 8) {
         if (param->isArray) {
-          emitSd("a" + std::to_string(i), sym.offset, "s0");
+          emitSd("a" + std::to_string(intReg), sym.offset, "s0");
         } else {
-          emitSw("a" + std::to_string(i), sym.offset, "s0");
+          emitSw("a" + std::to_string(intReg), sym.offset, "s0");
         }
-      } else {
-        long long callerOffset = static_cast<long long>(i - 8) * kPtrSize;
+        ++intReg;
+        continue;
+      }
+
+      long long callerOffset = stackArgOffset;
+      stackArgOffset += kPtrSize;
+      if (param->type.base == BuiltinType::Float && !param->isArray) {
         emitLd("t0", callerOffset, "s0");
-        if (param->isArray) {
-          emitSd("t0", sym.offset, "s0");
-        } else {
-          emitSw("t0", sym.offset, "s0");
-        }
+        os_ << "\tfmv.w.x ft0, t0\n";
+        emitFsw("ft0", sym.offset, "s0");
+      } else {
+        emitLd("t0", callerOffset, "s0");
+        if (param->isArray) emitSd("t0", sym.offset, "s0");
+        else emitSw("t0", sym.offset, "s0");
       }
     }
   }
@@ -529,23 +676,38 @@ private:
       if (sym.isArray) {
         zeroArray(sym);
         if (def->init) {
-          std::vector<long long> values;
-          flattenInit(def->init.get(), values, constScopes_);
+          std::vector<const Expr *> values;
+          collectInitExprs(def->init.get(), values);
           long long slots = elementCount(sym.dims);
           if (static_cast<long long>(values.size()) > slots) {
             values.resize(static_cast<std::size_t>(slots));
           }
           for (std::size_t i = 0; i < values.size(); ++i) {
-            if (values[i] == 0) {
-              continue;
+            if (const auto *integer = dynamic_cast<const IntExpr *>(values[i])) {
+              if (integer->value == 0) {
+                continue;
+              }
             }
-            os_ << "\tli t0, " << values[i] << "\n";
-            emitSw("t0", sym.offset + static_cast<long long>(i) * kWordSize, "s0");
+            if (const auto *floating = dynamic_cast<const FloatExpr *>(values[i])) {
+              if (floating->value == 0.0) {
+                continue;
+              }
+            }
+            genExpr(*values[i]);
+            if (sym.type == BuiltinType::Float) {
+              emitFsw("fa0", sym.offset + static_cast<long long>(i) * kWordSize, "s0");
+            } else {
+              emitSw("a0", sym.offset + static_cast<long long>(i) * kWordSize, "s0");
+            }
           }
         }
       } else if (def->init && def->init->expr) {
         genExpr(*def->init->expr);
-        emitSw("a0", sym.offset, "s0");
+        if (sym.type == BuiltinType::Float) {
+          emitFsw("fa0", sym.offset, "s0");
+        } else {
+          emitSw("a0", sym.offset, "s0");
+        }
       } else {
         os_ << "\tli t0, 0\n";
         emitSw("t0", sym.offset, "s0");
@@ -592,11 +754,19 @@ private:
       return;
     }
     if (const auto *assign = dynamic_cast<const AssignStmt *>(&stmt)) {
+      const Symbol *targetSym = lookupAny(assign->target->name);
       genAddress(*assign->target);
       pushA0();
       genExpr(*assign->value);
+      BuiltinType valueType = exprType(*assign->value);
       popTo("t0");
-      emitSw("a0", 0, "t0");
+      BuiltinType targetType = targetSym ? targetSym->type : BuiltinType::Int;
+      convertValue(valueType, targetType);
+      if (targetType == BuiltinType::Float) {
+        emitFsw("fa0", 0, "t0");
+      } else {
+        emitSw("a0", 0, "t0");
+      }
       return;
     }
     if (const auto *ifs = dynamic_cast<const IfStmt *>(&stmt)) {
@@ -640,6 +810,13 @@ private:
     if (const auto *ret = dynamic_cast<const ReturnStmt *>(&stmt)) {
       if (ret->value) {
         genExpr(*ret->value);
+        BuiltinType valueType = exprType(*ret->value);
+        BuiltinType returnType = currentReturnType_;
+        if (returnType == BuiltinType::Float && valueType != BuiltinType::Float) {
+          os_ << "\tfcvt.s.w fa0, a0\n";
+        } else if (returnType == BuiltinType::Int && valueType == BuiltinType::Float) {
+          os_ << "\tfcvt.w.s a0, fa0, rtz\n";
+        }
       }
       os_ << "\tj " << currentReturnLabel_ << "\n";
     }
@@ -650,8 +827,10 @@ private:
       os_ << "\tli a0, " << integer->value << "\n";
       return;
     }
-    if (dynamic_cast<const FloatExpr *>(&expr)) {
-      throw std::runtime_error("RISC-V backend does not support float expressions yet");
+    if (const auto *floating = dynamic_cast<const FloatExpr *>(&expr)) {
+      os_ << "\tli t0, " << floatBits(floating->value) << "\n";
+      os_ << "\tfmv.w.x fa0, t0\n";
+      return;
     }
     if (const auto *var = dynamic_cast<const VarExpr *>(&expr)) {
       const Symbol *sym = lookupAny(var->name);
@@ -660,7 +839,11 @@ private:
         return;
       }
       genAddress(*var);
-      emitLw("a0", 0, "a0");
+      if (sym && sym->type == BuiltinType::Float) {
+        emitFlw("fa0", 0, "a0");
+      } else {
+        emitLw("a0", 0, "a0");
+      }
       return;
     }
     if (const auto *unary = dynamic_cast<const UnaryExpr *>(&expr)) {
@@ -669,11 +852,21 @@ private:
         return;
       }
       if (unary->op == "-") {
-        os_ << "\tneg a0, a0\n";
+        if (exprType(*unary->operand) == BuiltinType::Float) {
+          os_ << "\tfneg.s fa0, fa0\n";
+        } else {
+          os_ << "\tneg a0, a0\n";
+        }
         return;
       }
       if (unary->op == "!") {
-        os_ << "\tseqz a0, a0\n";
+        if (exprType(*unary->operand) == BuiltinType::Float) {
+          os_ << "\tli t0, 0\n";
+          os_ << "\tfmv.w.x ft0, t0\n";
+          os_ << "\tfeq.s a0, fa0, ft0\n";
+        } else {
+          os_ << "\tseqz a0, a0\n";
+        }
         return;
       }
     }
@@ -693,6 +886,13 @@ private:
   }
 
   void genBinary(const BinaryExpr &expr) {
+    BuiltinType lhsType = exprType(*expr.lhs);
+    BuiltinType rhsType = exprType(*expr.rhs);
+    if (lhsType == BuiltinType::Float || rhsType == BuiltinType::Float) {
+      genFloatBinary(expr, lhsType, rhsType);
+      return;
+    }
+
     genExpr(*expr.lhs);
     pushA0();
     genExpr(*expr.rhs);
@@ -722,6 +922,33 @@ private:
     } else {
       throw std::runtime_error("unsupported binary operator: " + expr.op);
     }
+  }
+
+  void genFloatBinary(const BinaryExpr &expr, BuiltinType lhsType, BuiltinType rhsType) {
+    genExpr(*expr.lhs);
+    if (lhsType != BuiltinType::Float) {
+      os_ << "\tfcvt.s.w fa0, a0\n";
+    }
+    pushFa0();
+    genExpr(*expr.rhs);
+    if (rhsType != BuiltinType::Float) {
+      os_ << "\tfcvt.s.w fa0, a0\n";
+    }
+    popFTo("ft0");
+
+    if (expr.op == "+") os_ << "\tfadd.s fa0, ft0, fa0\n";
+    else if (expr.op == "-") os_ << "\tfsub.s fa0, ft0, fa0\n";
+    else if (expr.op == "*") os_ << "\tfmul.s fa0, ft0, fa0\n";
+    else if (expr.op == "/") os_ << "\tfdiv.s fa0, ft0, fa0\n";
+    else if (expr.op == "==") os_ << "\tfeq.s a0, ft0, fa0\n";
+    else if (expr.op == "!=") {
+      os_ << "\tfeq.s a0, ft0, fa0\n";
+      os_ << "\txori a0, a0, 1\n";
+    } else if (expr.op == "<") os_ << "\tflt.s a0, ft0, fa0\n";
+    else if (expr.op == "<=") os_ << "\tfle.s a0, ft0, fa0\n";
+    else if (expr.op == ">") os_ << "\tflt.s a0, fa0, ft0\n";
+    else if (expr.op == ">=") os_ << "\tfle.s a0, fa0, ft0\n";
+    else throw std::runtime_error("unsupported float binary operator: " + expr.op);
   }
 
   void genLogicalValue(const BinaryExpr &expr) {
@@ -756,24 +983,73 @@ private:
       }
     }
     genExpr(expr);
-    os_ << "\tbnez a0, " << trueLabel << "\n";
+    if (exprType(expr) == BuiltinType::Float) {
+      os_ << "\tli t0, 0\n";
+      os_ << "\tfmv.w.x ft0, t0\n";
+      os_ << "\tfeq.s a0, fa0, ft0\n";
+      os_ << "\tbeqz a0, " << trueLabel << "\n";
+    } else {
+      os_ << "\tbnez a0, " << trueLabel << "\n";
+    }
     os_ << "\tj " << falseLabel << "\n";
   }
 
   void genCall(const CallExpr &call) {
     for (std::size_t i = call.args.size(); i > 0; --i) {
-      genExpr(*call.args[i - 1]);
-      pushA0();
-    }
-    for (std::size_t i = 0; i < call.args.size(); ++i) {
-      popTo("t0");
-      if (i < 8) {
-        os_ << "\tmv a" << i << ", t0\n";
+      const Expr &arg = *call.args[i - 1];
+      BuiltinType fromType = exprType(arg);
+      BuiltinType toType = expectedArgType(call, i - 1);
+      bool argArray = isArrayPointerArg(arg);
+      genExpr(arg);
+      if (!argArray) {
+        convertValue(fromType, toType);
+      }
+      if (toType == BuiltinType::Float && !argArray) {
+        pushFa0();
       } else {
-        emitSd("t0", static_cast<long long>(i - 8) * kPtrSize, "sp");
+        pushA0();
+      }
+    }
+    int intReg = 0;
+    int floatReg = 0;
+    long long stackOffset = 0;
+    for (std::size_t i = 0; i < call.args.size(); ++i) {
+      BuiltinType argType = expectedArgType(call, i);
+      bool argArray = isArrayPointerArg(*call.args[i]);
+      if (argType == BuiltinType::Float && !argArray && floatReg < 8) {
+        popFTo("fa" + std::to_string(floatReg++));
+      } else if ((argType != BuiltinType::Float || argArray) && intReg < 8) {
+        popTo("t0");
+        os_ << "\tmv a" << intReg++ << ", t0\n";
+      } else {
+        if (argType == BuiltinType::Float) {
+          popFTo("ft0");
+          emitFsw("ft0", stackOffset, "sp");
+        } else {
+          popTo("t0");
+          emitSd("t0", stackOffset, "sp");
+        }
+        stackOffset += kPtrSize;
       }
     }
     os_ << "\tcall " << sanitizeLabel(call.callee) << "\n";
+  }
+
+  BuiltinType expectedArgType(const CallExpr &call, std::size_t index) const {
+    auto found = functions_.find(call.callee);
+    if (found == functions_.end() || index >= found->second.paramTypes.size()) {
+      return exprType(*call.args[index]);
+    }
+    return found->second.paramTypes[index];
+  }
+
+  bool isArrayPointerArg(const Expr &expr) const {
+    const auto *var = dynamic_cast<const VarExpr *>(&expr);
+    if (!var || !var->indices.empty()) {
+      return false;
+    }
+    const Symbol *sym = lookupAny(var->name);
+    return sym && sym->isArray;
   }
 
   void genAddress(const VarExpr &expr) {
@@ -821,19 +1097,79 @@ private:
     emitSd("a0", 8, "sp");
   }
 
+  void pushFa0() {
+    emitAddi("sp", "sp", -16);
+    emitFsw("fa0", 8, "sp");
+  }
+
   void popTo(const std::string &reg) {
     emitLd(reg, 8, "sp");
     emitAddi("sp", "sp", 16);
   }
 
+  void popFTo(const std::string &reg) {
+    emitFlw(reg, 8, "sp");
+    emitAddi("sp", "sp", 16);
+  }
+
+  BuiltinType exprType(const Expr &expr) const {
+    if (dynamic_cast<const FloatExpr *>(&expr)) {
+      return BuiltinType::Float;
+    }
+    if (dynamic_cast<const IntExpr *>(&expr)) {
+      return BuiltinType::Int;
+    }
+    if (const auto *var = dynamic_cast<const VarExpr *>(&expr)) {
+      const Symbol *sym = lookupAny(var->name);
+      return sym ? sym->type : BuiltinType::Int;
+    }
+    if (const auto *unary = dynamic_cast<const UnaryExpr *>(&expr)) {
+      if (unary->op == "!") {
+        return BuiltinType::Int;
+      }
+      return exprType(*unary->operand);
+    }
+    if (const auto *binary = dynamic_cast<const BinaryExpr *>(&expr)) {
+      if (binary->op == "&&" || binary->op == "||" || binary->op == "==" ||
+          binary->op == "!=" || binary->op == "<" || binary->op == "<=" ||
+          binary->op == ">" || binary->op == ">=") {
+        return BuiltinType::Int;
+      }
+      BuiltinType lhs = exprType(*binary->lhs);
+      BuiltinType rhs = exprType(*binary->rhs);
+      return lhs == BuiltinType::Float || rhs == BuiltinType::Float
+                 ? BuiltinType::Float
+                 : BuiltinType::Int;
+    }
+    if (const auto *call = dynamic_cast<const CallExpr *>(&expr)) {
+      auto found = functions_.find(call->callee);
+      return found == functions_.end() ? BuiltinType::Int : found->second.returnType;
+    }
+    return BuiltinType::Int;
+  }
+
+  void convertValue(BuiltinType from, BuiltinType to) {
+    if (from == to || from == BuiltinType::Unknown || to == BuiltinType::Unknown ||
+        to == BuiltinType::Void) {
+      return;
+    }
+    if (from == BuiltinType::Int && to == BuiltinType::Float) {
+      os_ << "\tfcvt.s.w fa0, a0\n";
+    } else if (from == BuiltinType::Float && to == BuiltinType::Int) {
+      os_ << "\tfcvt.w.s a0, fa0, rtz\n";
+    }
+  }
+
   void pushScope() {
     scopes_.emplace_back();
     constScopes_.emplace_back();
+    floatConstScopes_.emplace_back();
   }
 
   void popScope() {
     scopes_.pop_back();
     constScopes_.pop_back();
+    floatConstScopes_.pop_back();
   }
 
   void bind(const std::string &name, Symbol sym) { scopes_.back()[name] = std::move(sym); }
@@ -882,6 +1218,14 @@ private:
 
   void emitSw(const std::string &rs, long long offset, const std::string &base) {
     emitMem("sw", rs, offset, base);
+  }
+
+  void emitFlw(const std::string &rd, long long offset, const std::string &base) {
+    emitMem("flw", rd, offset, base);
+  }
+
+  void emitFsw(const std::string &rs, long long offset, const std::string &base) {
+    emitMem("fsw", rs, offset, base);
   }
 
   void emitLd(const std::string &rd, long long offset, const std::string &base) {
