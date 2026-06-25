@@ -263,6 +263,16 @@ bool hasNonZeroValue(const std::vector<long long> &values) {
                      [](long long value) { return value != 0; });
 }
 
+bool isLiteralZero(const Expr &expr) {
+  if (const auto *integer = dynamic_cast<const IntExpr *>(&expr)) {
+    return integer->value == 0;
+  }
+  if (const auto *floating = dynamic_cast<const FloatExpr *>(&expr)) {
+    return floating->value == 0.0;
+  }
+  return false;
+}
+
 class Generator {
 public:
   Generator(const CompUnit &unit, std::ostream &os, RiscVCodeGenOptions options)
@@ -674,31 +684,36 @@ private:
         constScopes_.back()[def->name] = evalConstInt(*def->init->expr, constScopes_);
       }
       if (sym.isArray) {
-        zeroArray(sym);
-        if (def->init) {
-          std::vector<const Expr *> values;
-          collectInitExprs(def->init.get(), values);
-          long long slots = elementCount(sym.dims);
-          if (static_cast<long long>(values.size()) > slots) {
-            values.resize(static_cast<std::size_t>(slots));
+        if (!def->init) {
+          continue;
+        }
+
+        std::vector<const Expr *> values;
+        collectInitExprs(def->init.get(), values);
+        long long slots = elementCount(sym.dims);
+        if (static_cast<long long>(values.size()) > slots) {
+          values.resize(static_cast<std::size_t>(slots));
+        }
+
+        std::size_t literalZeros = std::count_if(
+            values.begin(), values.end(),
+            [](const Expr *expr) { return expr && isLiteralZero(*expr); });
+        bool partialInit = static_cast<long long>(values.size()) < slots;
+        bool clearFirst =
+            partialInit || (literalZeros > 8 && literalZeros * 2 >= values.size());
+        if (clearFirst) {
+          zeroArray(sym);
+        }
+
+        for (std::size_t i = 0; i < values.size(); ++i) {
+          if (clearFirst && values[i] && isLiteralZero(*values[i])) {
+            continue;
           }
-          for (std::size_t i = 0; i < values.size(); ++i) {
-            if (const auto *integer = dynamic_cast<const IntExpr *>(values[i])) {
-              if (integer->value == 0) {
-                continue;
-              }
-            }
-            if (const auto *floating = dynamic_cast<const FloatExpr *>(values[i])) {
-              if (floating->value == 0.0) {
-                continue;
-              }
-            }
-            genExpr(*values[i]);
-            if (sym.type == BuiltinType::Float) {
-              emitFsw("fa0", sym.offset + static_cast<long long>(i) * kWordSize, "s0");
-            } else {
-              emitSw("a0", sym.offset + static_cast<long long>(i) * kWordSize, "s0");
-            }
+          genExpr(*values[i]);
+          if (sym.type == BuiltinType::Float) {
+            emitFsw("fa0", sym.offset + static_cast<long long>(i) * kWordSize, "s0");
+          } else {
+            emitSw("a0", sym.offset + static_cast<long long>(i) * kWordSize, "s0");
           }
         }
       } else if (def->init && def->init->expr) {
@@ -1024,10 +1039,14 @@ private:
       } else {
         if (argType == BuiltinType::Float) {
           popFTo("ft0");
-          emitFsw("ft0", stackOffset, "sp");
+          long long finalSpOffset =
+              static_cast<long long>(call.args.size() - i - 1) * 16;
+          emitFsw("ft0", finalSpOffset + stackOffset, "sp");
         } else {
           popTo("t0");
-          emitSd("t0", stackOffset, "sp");
+          long long finalSpOffset =
+              static_cast<long long>(call.args.size() - i - 1) * 16;
+          emitSd("t0", finalSpOffset + stackOffset, "sp");
         }
         stackOffset += kPtrSize;
       }
@@ -1073,12 +1092,7 @@ private:
     pushA0();
     for (std::size_t i = 0; i < expr.indices.size(); ++i) {
       genExpr(*expr.indices[i]);
-      long long stride = 1;
-      if (i + 1 < sym->dims.size()) {
-        for (std::size_t j = i + 1; j < sym->dims.size(); ++j) {
-          stride *= sym->dims[j];
-        }
-      }
+      long long stride = indexStride(*sym, i);
       if (stride != 1) {
         os_ << "\tli t0, " << stride << "\n";
         os_ << "\tmul a0, a0, t0\n";
@@ -1090,6 +1104,16 @@ private:
         pushA0();
       }
     }
+  }
+
+  long long indexStride(const Symbol &sym, std::size_t index) const {
+    long long stride = 1;
+    std::size_t firstDim =
+        sym.storage == Symbol::Storage::ParamPtr ? index : index + 1;
+    for (std::size_t j = firstDim; j < sym.dims.size(); ++j) {
+      stride *= sym.dims[j];
+    }
+    return stride;
   }
 
   void pushA0() {
