@@ -1099,7 +1099,7 @@ private:
     }
 
     if (sym->storage == Symbol::Storage::Global) {
-      os_ << "\tla a0, " << sym->label << "\n";
+      os_ << "\tlla a0, " << sym->label << "\n";
     } else if (sym->storage == Symbol::Storage::ParamPtr) {
       emitLd("a0", sym->offset, "s0");
     } else {
