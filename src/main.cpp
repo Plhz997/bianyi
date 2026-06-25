@@ -1,4 +1,5 @@
 #include "../include/backend/RiscVCodeGen.h"
+#include "../include/frontend/ASTOptimizer.h"
 #include "../include/frontend/Lexer.h"
 #include "../include/frontend/Parser.h"
 #include "../include/frontend/Sema.h"
@@ -120,6 +121,9 @@ int main(int argc, char **argv) {
     diag.printAll();
     return 1;
   }
+
+  ASTOptimizer optimizer;
+  optimizer.optimize(*unit);
 
   if (opts.dumpAst) {
     unit->dump(std::cout, 0);

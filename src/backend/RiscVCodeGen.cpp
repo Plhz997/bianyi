@@ -208,37 +208,51 @@ long long elementCount(const std::vector<long long> &dims) {
   return count;
 }
 
-void flattenConstInit(const InitVal *init, BuiltinType type,
-                      std::vector<long long> &values,
-                      const std::vector<std::unordered_map<std::string, long long>> &constScopes,
-                      const std::vector<std::unordered_map<std::string, double>> &floatScopes) {
+long long elementStride(const std::vector<long long> &dims, std::size_t depth) {
+  long long stride = 1;
+  for (std::size_t i = depth; i < dims.size(); ++i) {
+    stride *= dims[i];
+  }
+  return stride;
+}
+
+void fillInitSlots(const InitVal *init, const std::vector<long long> &dims,
+                   std::size_t depth, long long &cursor,
+                   std::vector<const Expr *> &slots) {
   if (!init) {
     return;
   }
-  if (init->isList) {
-    for (const auto &child : init->values) {
-      flattenConstInit(child.get(), type, values, constScopes, floatScopes);
+  if (!init->isList) {
+    if (init->expr && cursor >= 0 &&
+        cursor < static_cast<long long>(slots.size())) {
+      slots[static_cast<std::size_t>(cursor)] = init->expr.get();
     }
+    ++cursor;
     return;
   }
-  if (init->expr) {
-    values.push_back(evalConstBits(*init->expr, type, constScopes, floatScopes));
+
+  long long subSlots = depth < dims.size() ? elementStride(dims, depth + 1) : 1;
+  for (const auto &child : init->values) {
+    if (child->isList && !dims.empty() && depth < dims.size()) {
+      if (subSlots > 1 && cursor % subSlots != 0) {
+        cursor += subSlots - cursor % subSlots;
+      }
+      long long childCursor = cursor;
+      fillInitSlots(child.get(), dims, depth + 1, childCursor, slots);
+      cursor += subSlots;
+    } else {
+      fillInitSlots(child.get(), dims, depth, cursor, slots);
+    }
   }
 }
 
-void collectInitExprs(const InitVal *init, std::vector<const Expr *> &values) {
-  if (!init) {
-    return;
-  }
-  if (init->isList) {
-    for (const auto &child : init->values) {
-      collectInitExprs(child.get(), values);
-    }
-    return;
-  }
-  if (init->expr) {
-    values.push_back(init->expr.get());
-  }
+std::vector<const Expr *> collectInitSlots(const InitVal *init,
+                                           const std::vector<long long> &dims) {
+  long long slots = dims.empty() ? 1 : elementCount(dims);
+  std::vector<const Expr *> values(static_cast<std::size_t>(slots), nullptr);
+  long long cursor = 0;
+  fillInitSlots(init, dims, 0, cursor, values);
+  return values;
 }
 
 void emitWordRun(std::ostream &os, long long value, long long count) {
@@ -395,11 +409,16 @@ private:
       for (const auto &def : varDecl->defs) {
         const Symbol &sym = globals_.at(def->name);
         long long slots = sym.isArray ? elementCount(sym.dims) : 1;
-        std::vector<long long> values;
-        flattenConstInit(def->init.get(), sym.type, values, constScopes_,
-                         floatConstScopes_);
-        if (static_cast<long long>(values.size()) > slots) {
-          values.resize(static_cast<std::size_t>(slots));
+        std::vector<long long> values(static_cast<std::size_t>(slots), 0);
+        if (def->init) {
+          auto initSlots = collectInitSlots(def->init.get(), sym.dims);
+          for (std::size_t i = 0; i < initSlots.size() && i < values.size(); ++i) {
+            if (initSlots[i]) {
+              values[i] =
+                  evalConstBits(*initSlots[i], sym.type, constScopes_,
+                                floatConstScopes_);
+            }
+          }
         }
 
         bool needsData = hasNonZeroValue(values);
@@ -688,8 +707,7 @@ private:
           continue;
         }
 
-        std::vector<const Expr *> values;
-        collectInitExprs(def->init.get(), values);
+        std::vector<const Expr *> values = collectInitSlots(def->init.get(), sym.dims);
         long long slots = elementCount(sym.dims);
         if (static_cast<long long>(values.size()) > slots) {
           values.resize(static_cast<std::size_t>(slots));
@@ -706,7 +724,10 @@ private:
         }
 
         for (std::size_t i = 0; i < values.size(); ++i) {
-          if (clearFirst && values[i] && isLiteralZero(*values[i])) {
+          if (!values[i]) {
+            continue;
+          }
+          if (clearFirst && isLiteralZero(*values[i])) {
             continue;
           }
           genExpr(*values[i]);
