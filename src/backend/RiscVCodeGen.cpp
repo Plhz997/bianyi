@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -285,6 +286,21 @@ bool isLiteralZero(const Expr &expr) {
     return floating->value == 0.0;
   }
   return false;
+}
+
+std::optional<int> powerOfTwoShift(long long value) {
+  if (value <= 0) {
+    return std::nullopt;
+  }
+  if ((value & (value - 1)) != 0) {
+    return std::nullopt;
+  }
+  int shift = 0;
+  while (value > 1) {
+    value >>= 1;
+    ++shift;
+  }
+  return shift;
 }
 
 class Generator {
@@ -791,6 +807,27 @@ private:
     }
     if (const auto *assign = dynamic_cast<const AssignStmt *>(&stmt)) {
       const Symbol *targetSym = lookupAny(assign->target->name);
+      if (targetSym && assign->target->indices.empty() && !targetSym->isArray &&
+          (targetSym->storage == Symbol::Storage::Local ||
+           targetSym->storage == Symbol::Storage::Global)) {
+        genExpr(*assign->value);
+        BuiltinType valueType = exprType(*assign->value);
+        BuiltinType targetType = targetSym->type;
+        convertValue(valueType, targetType);
+        if (targetSym->storage == Symbol::Storage::Global) {
+          os_ << "\tlla t0, " << targetSym->label << "\n";
+          if (targetType == BuiltinType::Float) {
+            emitFsw("fa0", 0, "t0");
+          } else {
+            emitSw("a0", 0, "t0");
+          }
+        } else if (targetType == BuiltinType::Float) {
+          emitFsw("fa0", targetSym->offset, "s0");
+        } else {
+          emitSw("a0", targetSym->offset, "s0");
+        }
+        return;
+      }
       genAddress(*assign->target);
       pushA0();
       genExpr(*assign->value);
@@ -870,6 +907,25 @@ private:
     }
     if (const auto *var = dynamic_cast<const VarExpr *>(&expr)) {
       const Symbol *sym = lookupAny(var->name);
+      if (sym && var->indices.empty() && !sym->isArray &&
+          sym->storage == Symbol::Storage::Local) {
+        if (sym->type == BuiltinType::Float) {
+          emitFlw("fa0", sym->offset, "s0");
+        } else {
+          emitLw("a0", sym->offset, "s0");
+        }
+        return;
+      }
+      if (sym && var->indices.empty() && !sym->isArray &&
+          sym->storage == Symbol::Storage::Global) {
+        os_ << "\tlla a0, " << sym->label << "\n";
+        if (sym->type == BuiltinType::Float) {
+          emitFlw("fa0", 0, "a0");
+        } else {
+          emitLw("a0", 0, "a0");
+        }
+        return;
+      }
       if (sym && sym->isArray && var->indices.empty()) {
         genAddress(*var);
         return;
@@ -929,6 +985,10 @@ private:
       return;
     }
 
+    if (options_.optimize && tryGenIntBinaryImmediate(expr)) {
+      return;
+    }
+
     genExpr(*expr.lhs);
     pushA0();
     genExpr(*expr.rhs);
@@ -958,6 +1018,108 @@ private:
     } else {
       throw std::runtime_error("unsupported binary operator: " + expr.op);
     }
+  }
+
+  bool tryGenIntBinaryImmediate(const BinaryExpr &expr) {
+    if (const auto *rhs = dynamic_cast<const IntExpr *>(expr.rhs.get())) {
+      if (emitIntRhsImmediate(expr.op, *expr.lhs, rhs->value)) {
+        return true;
+      }
+    }
+
+    if (expr.op == "+" || expr.op == "*" || expr.op == "==" ||
+        expr.op == "!=") {
+      if (const auto *lhs = dynamic_cast<const IntExpr *>(expr.lhs.get())) {
+        if (emitIntRhsImmediate(expr.op, *expr.rhs, lhs->value)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  bool emitIntRhsImmediate(const std::string &op, const Expr &lhs,
+                           long long imm) {
+    if (op == "/" || op == "%") {
+      return false;
+    }
+
+    genExpr(lhs);
+
+    if (op == "+") {
+      emitAddi("a0", "a0", imm);
+      return true;
+    }
+    if (op == "-") {
+      emitAddi("a0", "a0", -imm);
+      return true;
+    }
+    if (op == "*") {
+      if (imm == 0) {
+        os_ << "\tli a0, 0\n";
+      } else if (imm == 1) {
+        return true;
+      } else if (auto shift = powerOfTwoShift(imm)) {
+        os_ << "\tslli a0, a0, " << *shift << "\n";
+      } else {
+        os_ << "\tli t0, " << imm << "\n";
+        os_ << "\tmul a0, a0, t0\n";
+      }
+      return true;
+    }
+    if (op == "==") {
+      if (imm == 0) {
+        os_ << "\tseqz a0, a0\n";
+      } else {
+        os_ << "\tli t0, " << imm << "\n";
+        os_ << "\tsub a0, a0, t0\n";
+        os_ << "\tseqz a0, a0\n";
+      }
+      return true;
+    }
+    if (op == "!=") {
+      if (imm == 0) {
+        os_ << "\tsnez a0, a0\n";
+      } else {
+        os_ << "\tli t0, " << imm << "\n";
+        os_ << "\tsub a0, a0, t0\n";
+        os_ << "\tsnez a0, a0\n";
+      }
+      return true;
+    }
+    if (op == "<") {
+      if (imm >= -2048 && imm <= 2047) {
+        os_ << "\tslti a0, a0, " << imm << "\n";
+      } else {
+        os_ << "\tli t0, " << imm << "\n";
+        os_ << "\tslt a0, a0, t0\n";
+      }
+      return true;
+    }
+    if (op == ">=") {
+      if (imm >= -2048 && imm <= 2047) {
+        os_ << "\tslti a0, a0, " << imm << "\n";
+      } else {
+        os_ << "\tli t0, " << imm << "\n";
+        os_ << "\tslt a0, a0, t0\n";
+      }
+      os_ << "\txori a0, a0, 1\n";
+      return true;
+    }
+    if (op == ">") {
+      os_ << "\tli t0, " << imm << "\n";
+      os_ << "\tslt a0, t0, a0\n";
+      return true;
+    }
+    if (op == "<=") {
+      os_ << "\tli t0, " << imm << "\n";
+      os_ << "\tslt a0, t0, a0\n";
+      os_ << "\txori a0, a0, 1\n";
+      return true;
+    }
+
+    return false;
   }
 
   void genFloatBinary(const BinaryExpr &expr, BuiltinType lhsType, BuiltinType rhsType) {
@@ -1293,13 +1455,139 @@ private:
   }
 };
 
+bool isStackAdjust(const std::string &line) {
+  return line == "\taddi sp, sp, -16" || line == "\taddi sp, sp, 16";
+}
+
+bool isControlTransfer(const std::string &line) {
+  return line.rfind("\tcall ", 0) == 0 || line.rfind("\tj ", 0) == 0 ||
+         line.rfind("\tb", 0) == 0 || line == "\tret";
+}
+
+bool isLabelLine(const std::string &line) {
+  return !line.empty() && line[0] != '\t';
+}
+
+std::vector<std::string> splitLines(const std::string &text) {
+  std::vector<std::string> lines;
+  std::istringstream input(text);
+  std::string line;
+  while (std::getline(input, line)) {
+    lines.push_back(line);
+  }
+  return lines;
+}
+
+std::string replaceRegister(std::string line, const std::string &from,
+                            const std::string &to) {
+  std::size_t pos = 0;
+  while ((pos = line.find(from, pos)) != std::string::npos) {
+    bool leftOk = pos == 0 || !(std::isalnum(static_cast<unsigned char>(line[pos - 1])) ||
+                                line[pos - 1] == '_');
+    std::size_t end = pos + from.size();
+    bool rightOk = end >= line.size() ||
+                   !(std::isalnum(static_cast<unsigned char>(line[end])) ||
+                     line[end] == '_');
+    if (leftOk && rightOk) {
+      line.replace(pos, from.size(), to);
+      pos += to.size();
+    } else {
+      pos = end;
+    }
+  }
+  return line;
+}
+
+std::optional<std::size_t> findSavedUse(const std::vector<std::string> &lines,
+                                        std::size_t begin) {
+  std::size_t limit = std::min(lines.size(), begin + 5);
+  for (std::size_t i = begin; i < limit; ++i) {
+    const std::string &line = lines[i];
+    if (isStackAdjust(line) || isControlTransfer(line) || isLabelLine(line)) {
+      return std::nullopt;
+    }
+    if (line.find("t0") != std::string::npos) {
+      return i;
+    }
+  }
+  return std::nullopt;
+}
+
+bool canKeepInTempRegister(const std::vector<std::string> &lines,
+                           std::size_t begin, std::size_t end) {
+  for (std::size_t i = begin; i < end; ++i) {
+    const std::string &line = lines[i];
+    if (isStackAdjust(line) || isControlTransfer(line) || isLabelLine(line) ||
+        line.find("t5") != std::string::npos) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::string peepholeOptimizeAssembly(const std::string &assembly) {
+  std::vector<std::string> lines = splitLines(assembly);
+  std::vector<std::string> out;
+  out.reserve(lines.size());
+
+  for (std::size_t i = 0; i < lines.size();) {
+    if (i + 3 < lines.size() && lines[i] == "\taddi sp, sp, -16" &&
+        lines[i + 1] == "\tsd a0, 8(sp)") {
+      std::size_t pop = i + 2;
+      while (pop + 1 < lines.size() &&
+             !(lines[pop] == "\tld t0, 8(sp)" &&
+               lines[pop + 1] == "\taddi sp, sp, 16")) {
+        if (isStackAdjust(lines[pop]) || isControlTransfer(lines[pop]) ||
+            isLabelLine(lines[pop]) || lines[pop].find("t5") != std::string::npos) {
+          break;
+        }
+        ++pop;
+      }
+
+      if (pop + 1 < lines.size() && lines[pop] == "\tld t0, 8(sp)" &&
+          lines[pop + 1] == "\taddi sp, sp, 16" &&
+          canKeepInTempRegister(lines, i + 2, pop)) {
+        auto use = findSavedUse(lines, pop + 2);
+        if (use) {
+          out.push_back("\tmv t5, a0");
+          for (std::size_t k = i + 2; k < pop; ++k) {
+            out.push_back(lines[k]);
+          }
+          for (std::size_t k = pop + 2; k < *use; ++k) {
+            out.push_back(lines[k]);
+          }
+          out.push_back(replaceRegister(lines[*use], "t0", "t5"));
+          i = *use + 1;
+          continue;
+        }
+      }
+    }
+
+    out.push_back(lines[i]);
+    ++i;
+  }
+
+  std::ostringstream result;
+  for (const auto &line : out) {
+    result << line << '\n';
+  }
+  return result.str();
+}
+
 } // namespace
 
 RiscVCodeGenerator::RiscVCodeGenerator(RiscVCodeGenOptions options)
     : options_(options) {}
 
 void RiscVCodeGenerator::generate(const CompUnit &unit, std::ostream &os) {
-  Generator(unit, os, options_).run();
+  if (!options_.optimize) {
+    Generator(unit, os, options_).run();
+    return;
+  }
+
+  std::ostringstream buffer;
+  Generator(unit, buffer, options_).run();
+  os << peepholeOptimizeAssembly(buffer.str());
 }
 
 } // namespace by::backend
